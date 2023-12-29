@@ -3,24 +3,27 @@ package fixedkv
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
 	"github.com/tidwall/btree"
 )
 
-const KeyOffset = 96
-const KeyCountOffset = 32
+const KeyCountOffset = 4
+const DBNameOffeset = 6
+const HeaderSize = 96
+const MaxSize = 4096
 
 type FixedKV struct {
-	fp    *os.File
-	buff  []byte
-	index *btree.Map[string, uint64]
-	mu    sync.RWMutex
+	fp       *os.File
+	buff     []byte
+	keyCount uint16
+	index    *btree.Map[string, []byte]
+	mu       sync.RWMutex
 }
 
-// Creates a new FixedKV database file. Will overwrite existing file if already exists
-// Use fixedkv.Open() to open existing FixedKV database
+// Creates a new FixedKV database file, will write and flush header data to disk.
 func NewFixedKV(name string) (*FixedKV, error) {
 	fp, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, 0600)
 
@@ -28,20 +31,32 @@ func NewFixedKV(name string) (*FixedKV, error) {
 		return nil, err
 	}
 
-	buff := make([]byte, 4096)
+	buff := make([]byte, MaxSize)
+
+	// detect if new or existing db file
+	read, err := fp.Read(buff[:HeaderSize])
+
+	if err != nil && err != io.EOF {
+		fp.Close()
+		return nil, err
+	}
 
 	kv := &FixedKV{
 		fp:    fp,
 		buff:  buff,
-		index: btree.NewMap[string, uint64](3),
+		index: btree.NewMap[string, []byte](3),
 	}
 
-	version := encodeVersion(0, 0, 1)
+	if read > 0 {
+		return kv, nil
+	}
+
+	version := encodeVersion(0, 0, 33)
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	writeHeader(buff, version, 0)
+	writeHeader(buff, version, kv.keyCount)
 
 	fp.Write(buff)
 	fp.Sync()
@@ -50,16 +65,30 @@ func NewFixedKV(name string) (*FixedKV, error) {
 }
 
 func writeHeader(buff []byte, version uint32, keyCount uint16) {
-	binary.LittleEndian.PutUint32(buff[0:KeyCountOffset], version)
+	binary.LittleEndian.PutUint32(buff, version)
 	binary.LittleEndian.PutUint16(buff[KeyCountOffset:], keyCount)
+	copy(buff[DBNameOffeset:], []byte("4KB FixedKV database"))
 }
 
-func (kv *FixedKV) Get(key []byte) ([]byte, bool) {
+func (kv *FixedKV) Get(key string) ([]byte, bool) {
+	// get key/value offset from index
+	// read value length
+	// read value upto length
+
 	return nil, false
 }
 
-func (kv *FixedKV) Set(key []byte, value []byte) bool {
-	return false
+func (kv *FixedKV) Set(key string, value []byte) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.keyCount++
+
+	// increment key count
+	binary.LittleEndian.PutUint16(kv.buff[KeyCountOffset:], kv.keyCount)
+
+	_, result := kv.index.Set(key, value)
+
+	return result
 }
 
 func (kv *FixedKV) Close() error {

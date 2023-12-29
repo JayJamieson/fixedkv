@@ -17,3 +17,8 @@ First 96 bytes of the file is used for storing the header.
 - Unused bytes for future use
 - Offset pointing to key/value pairs in the file
 - The stored key/value pairs of variable length key and values
+
+### Key Value format
+
+| key len | value len | key | val |
+|   2B    |    2B     | ... | ... |
