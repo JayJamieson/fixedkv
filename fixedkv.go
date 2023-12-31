@@ -15,6 +15,13 @@ const DBNameOffeset = 6
 const HeaderSize = 96
 const MaxSize = 4096
 
+// Version numbers
+const (
+	Major = 0
+	Minor = 1
+	Patch = 0
+)
+
 type FixedKV struct {
 	fp       *os.File
 	buff     []byte
@@ -24,7 +31,7 @@ type FixedKV struct {
 }
 
 // Creates a new FixedKV database file, will write and flush header data to disk.
-func NewFixedKV(name string) (*FixedKV, error) {
+func New(name string, degree int) (*FixedKV, error) {
 	fp, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, 0600)
 
 	if err != nil {
@@ -44,14 +51,14 @@ func NewFixedKV(name string) (*FixedKV, error) {
 	kv := &FixedKV{
 		fp:    fp,
 		buff:  buff,
-		index: btree.NewMap[string, []byte](3),
+		index: btree.NewMap[string, []byte](degree),
 	}
 
 	if read > 0 {
 		return kv, nil
 	}
 
-	version := encodeVersion(0, 0, 33)
+	version := encodeVersion(Major, Minor, Patch)
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -71,27 +78,65 @@ func writeHeader(buff []byte, version uint32, keyCount uint16) {
 }
 
 func (kv *FixedKV) Get(key string) ([]byte, bool) {
-	// get key/value offset from index
-	// read value length
-	// read value upto length
-
-	return nil, false
+	return kv.index.Get(key)
 }
 
 func (kv *FixedKV) Set(key string, value []byte) bool {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	kv.keyCount++
 
-	// increment key count
 	binary.LittleEndian.PutUint16(kv.buff[KeyCountOffset:], kv.keyCount)
+	kv.mu.Unlock()
 
 	_, result := kv.index.Set(key, value)
 
 	return result
 }
 
+// Flushes In-memory KV Database to disk and closes file handle
+// Must be called or dataloss will occur
 func (kv *FixedKV) Close() error {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	idx := 0
+	kvOffset := HeaderSize + 2*(kv.keyCount-1) + 2
+
+	prev := kvOffset
+	next := uint16(0)
+
+	kv.index.Ascend("", func(key string, value []byte) bool {
+		idx++
+		keyOffset := HeaderSize + 2*(idx-1)
+		kLen := len([]byte(key))
+		vLen := len(value)
+
+		dataLen := 4 + uint16(kLen+vLen)
+		next = prev
+		prev = next + dataLen
+
+		binary.LittleEndian.PutUint16(kv.buff[keyOffset:], next)
+		binary.LittleEndian.PutUint16(kv.buff[next:], uint16(kLen))
+		binary.LittleEndian.PutUint16(kv.buff[next+2:], uint16(vLen))
+
+		copy(kv.buff[next+4:], []byte(key))
+		copy(kv.buff[next+4+uint16(kLen):], value)
+
+		return true
+	})
+
+	_, err := kv.fp.WriteAt(kv.buff, io.SeekStart)
+
+	if err != nil {
+		return err
+	}
+
+	err = kv.fp.Sync()
+
+	if err != nil {
+		return err
+	}
+
 	return kv.fp.Close()
 }
 
