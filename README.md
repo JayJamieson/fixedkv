@@ -1,6 +1,10 @@
 # fixed-kv
 
-fixed-kv is a fixed sized (4KB, 8KB, 16KB) key value storage engine with a dead simple binary format.
+fixed-kv is a in memory disk persisted key value storage engine of fixed size (4KB), with a dead simple binary format.
+
+A new `fixedkv` instance will use in memory btree for `Get` and `Set` operations. Closing the `fixedkv` will write to disk where.
+
+Data can be restored using the `fixedkv.Reader()`. This will load only header and key/value offsets to allow reading of keys again.
 
 ## Format
 
