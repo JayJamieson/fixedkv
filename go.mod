@@ -1,4 +1,4 @@
-module github.com/JayJamieson/fixed-kv
+module github.com/JayJamieson/fixedkv
 
 go 1.21.3
 

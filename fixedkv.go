@@ -2,6 +2,7 @@ package fixedkv
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,10 +11,14 @@ import (
 	"github.com/tidwall/btree"
 )
 
+var errInvalidHeader = errors.New("invalid header format")
+
 const KeyCountOffset = 4
-const DBNameOffeset = 6
+const DBNameOffset = 6
 const HeaderSize = 96
 const MaxSize = 4096
+const DefaultDegree = 3
+const DBName = "4KB FixedKV database"
 
 // Version numbers
 const (
@@ -31,7 +36,7 @@ type FixedKV struct {
 }
 
 // Creates a new FixedKV database file, will write and flush header data to disk.
-func New(name string, degree int) (*FixedKV, error) {
+func New(name string) (*FixedKV, error) {
 	fp, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, 0600)
 
 	if err != nil {
@@ -51,7 +56,7 @@ func New(name string, degree int) (*FixedKV, error) {
 	kv := &FixedKV{
 		fp:    fp,
 		buff:  buff,
-		index: btree.NewMap[string, []byte](degree),
+		index: btree.NewMap[string, []byte](DefaultDegree),
 	}
 
 	if read > 0 {
@@ -74,7 +79,7 @@ func New(name string, degree int) (*FixedKV, error) {
 func writeHeader(buff []byte, version uint32, keyCount uint16) {
 	binary.LittleEndian.PutUint32(buff, version)
 	binary.LittleEndian.PutUint16(buff[KeyCountOffset:], keyCount)
-	copy(buff[DBNameOffeset:], []byte("4KB FixedKV database"))
+	copy(buff[DBNameOffset:], []byte("4KB FixedKV database"))
 }
 
 func (kv *FixedKV) Get(key string) ([]byte, bool) {
