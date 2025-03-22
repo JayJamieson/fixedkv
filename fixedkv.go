@@ -11,39 +11,36 @@ import (
 	"github.com/tidwall/btree"
 )
 
-var errInvalidHeader = errors.New("invalid header format")
+var ErrInvalidHeader = errors.New("invalid header format")
+var ErrReadonlyDb = errors.New("readonly db")
+var ErrDatabaseClosed = errors.New("database closed")
 
 const KeyCountOffset = 4
 const DBNameOffset = 6
 const HeaderSize = 96
-const MaxSize = 4096
-const DefaultDegree = 3
-const DBName = "4KB FixedKV database"
+const DefaultSize = 4096
+const DefaultDegree = 32
+const DBName = "FixedKV database"
 
-// Version numbers
-const (
-	Major = 0
-	Minor = 1
-	Patch = 0
-)
+const fileFormatVersion = 1
 
 type FixedKV struct {
 	fp       *os.File
-	buff     []byte
-	keyCount uint16
 	index    *btree.Map[string, []byte]
 	mu       sync.RWMutex
+	readonly bool // false for new fixedkv, true opening existing kv
+	closed   bool // true if the database is closed
 }
 
 // Creates a new FixedKV database file, will write and flush header data to disk.
-func New(name string) (*FixedKV, error) {
+func Open(name string) (*FixedKV, error) {
 	fp, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, 0600)
 
 	if err != nil {
 		return nil, err
 	}
 
-	buff := make([]byte, MaxSize)
+	buff := make([]byte, HeaderSize)
 
 	// detect if new or existing db file
 	read, err := fp.Read(buff[:HeaderSize])
@@ -55,82 +52,131 @@ func New(name string) (*FixedKV, error) {
 
 	kv := &FixedKV{
 		fp:    fp,
-		buff:  buff,
 		index: btree.NewMap[string, []byte](DefaultDegree),
 	}
 
-	if read > 0 {
-		return kv, nil
+	// TODO: maybe need to do something when fsync fails
+	err = fp.Sync()
+	if err != nil {
+		return nil, err
 	}
 
-	version := encodeVersion(Major, Minor, Patch)
-
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	writeHeader(buff, version, kv.keyCount)
-
-	fp.Write(buff)
-	fp.Sync()
+	// if header is found, this is existing fixedkv file and can only be read
+	if read > 0 {
+		kv.readonly = true
+		return kv, nil
+	}
 
 	return kv, nil
 }
 
-func writeHeader(buff []byte, version uint32, keyCount uint16) {
-	binary.LittleEndian.PutUint32(buff, version)
+func writeHeader(buff []byte, keyCount uint16) {
+	binary.LittleEndian.PutUint32(buff, fileFormatVersion)
 	binary.LittleEndian.PutUint16(buff[KeyCountOffset:], keyCount)
-	copy(buff[DBNameOffset:], []byte("4KB FixedKV database"))
+	copy(buff[DBNameOffset:], []byte(DBName))
 }
 
 func (kv *FixedKV) Get(key string) ([]byte, bool) {
-	return kv.index.Get(key)
-}
-
-func (kv *FixedKV) Set(key string, value []byte) bool {
-	kv.mu.Lock()
-	kv.keyCount++
-
-	binary.LittleEndian.PutUint16(kv.buff[KeyCountOffset:], kv.keyCount)
-	kv.mu.Unlock()
-
-	_, result := kv.index.Set(key, value)
-
-	return result
-}
-
-// Flushes In-memory KV Database to disk and closes file handle
-// Must be called or dataloss will occur
-func (kv *FixedKV) Close() error {
+	// TODO add readonly check and scan for key from disk instead of index
+	// after scan add key to index
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	idx := 0
-	kvOffset := HeaderSize + 2*(kv.keyCount-1) + 2
+	if v, ok := kv.index.Get(key); ok {
+		return v, true
+	}
 
-	prev := kvOffset
-	next := uint16(0)
+	// set starting point to of key-value pairs
+	kv.fp.Seek(1, HeaderSize)
+
+	var keyLen uint16
+	var valLen uint16
+	for {
+		if err := binary.Read(kv.fp, binary.LittleEndian, &keyLen); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, false
+		}
+
+		if err := binary.Read(kv.fp, binary.LittleEndian, &valLen); err != nil {
+			return nil, false
+		}
+
+		keyBytes := make([]byte, keyLen)
+		if _, err := io.ReadFull(kv.fp, keyBytes); err != nil {
+			return nil, false
+		}
+
+		valBytes := make([]byte, valLen)
+		if _, err := io.ReadFull(kv.fp, valBytes); err != nil {
+			return nil, false
+		}
+
+		if string(keyBytes) == key {
+			// cache result in index for future lookups
+			kv.index.Set(key, valBytes)
+			return valBytes, true
+		}
+	}
+
+	return nil, false
+}
+
+// Set inserts a new key-value pair. If file is readonly then set will
+// error with ErrReadonlyDb. If setting a non existen key then nil value, false
+// for replaced value and nil error.
+// If value is replaced then previous value, true and no error is returned.
+func (kv *FixedKV) Set(key string, value []byte) ([]byte, bool, error) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if kv.readonly {
+		return nil, false, ErrReadonlyDb
+	}
+
+	// if replaced is true then previous value is returned otherwise nil
+	previousOrCurrent, replaced := kv.index.Set(key, value)
+
+	return previousOrCurrent, replaced, nil
+}
+
+// Flushes In-memory KV Database to disk in ascending key order
+// Must be called or dataloss will occur
+func (kv *FixedKV) Save() error {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if kv.readonly {
+		return ErrReadonlyDb
+	}
+
+	var buf []byte = make([]byte, DefaultSize)
+
+	// write out number of keys to header
+	numKeys := uint16(kv.index.Len())
+	writeOffset := HeaderSize
+
+	writeHeader(buf, numKeys)
 
 	kv.index.Ascend("", func(key string, value []byte) bool {
-		idx++
-		keyOffset := HeaderSize + 2*(idx-1)
+
 		kLen := len([]byte(key))
 		vLen := len(value)
 
-		dataLen := 4 + uint16(kLen+vLen)
-		next = prev
-		prev = next + dataLen
+		binary.LittleEndian.PutUint16(buf[writeOffset:], uint16(kLen))
+		binary.LittleEndian.PutUint16(buf[writeOffset+2:], uint16(vLen))
 
-		binary.LittleEndian.PutUint16(kv.buff[keyOffset:], next)
-		binary.LittleEndian.PutUint16(kv.buff[next:], uint16(kLen))
-		binary.LittleEndian.PutUint16(kv.buff[next+2:], uint16(vLen))
+		copy(buf[writeOffset+4:], []byte(key))
+		copy(buf[uint16(writeOffset)+4+uint16(kLen):], value)
 
-		copy(kv.buff[next+4:], []byte(key))
-		copy(kv.buff[next+4+uint16(kLen):], value)
+		// move write pointer along by key and value length
+		writeOffset += 4 + kLen + vLen
 
 		return true
 	})
 
-	_, err := kv.fp.WriteAt(kv.buff, io.SeekStart)
+	_, err := kv.fp.WriteAt(buf[:writeOffset], io.SeekStart)
 
 	if err != nil {
 		return err
@@ -142,27 +188,23 @@ func (kv *FixedKV) Close() error {
 		return err
 	}
 
+	return nil
+}
+
+func (kv *FixedKV) Close() error {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if kv.closed {
+		return ErrDatabaseClosed
+	}
+
+	kv.closed = true
+	kv.fp.Sync()
+
 	return kv.fp.Close()
 }
 
 func (kv *FixedKV) Version() string {
-	kv.mu.RLock()
-	defer kv.mu.RUnlock()
-	version := binary.LittleEndian.Uint32(kv.buff)
-	return decodeVersion(version)
-}
-
-// Encode version number as a 32bit int
-func encodeVersion(major int, minor int, patch int) uint32 {
-	version := (major & 0xff) | ((minor & 0xff) << 8) | ((patch & 0xff) << 16)
-	return uint32(version)
-}
-
-// Decode version number as a semver string
-func decodeVersion(version uint32) string {
-	major := (version & 0xff)
-	minor := ((version >> 8) & 0xff)
-	patch := ((version >> 16) & 0xff)
-
-	return fmt.Sprintf("v%d.%d.%d", major, minor, patch)
+	return fmt.Sprintf("v%d", fileFormatVersion)
 }

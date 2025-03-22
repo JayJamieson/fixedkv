@@ -2,15 +2,18 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	fixedkv "github.com/JayJamieson/fixedkv"
 )
 
 func main() {
-	kv, err := fixedkv.New("fixedkv.db")
+	os.Remove("fixedkv.db")
+	kv, err := fixedkv.Open("fixedkv.db")
 
 	if err != nil {
 		fmt.Printf("%v\n", err)
+		return
 	}
 
 	kv.Set("A", []byte("Aa"))
@@ -20,17 +23,14 @@ func main() {
 	kv.Set("C", []byte("CCC"))
 	kv.Set("B", []byte("BB"))
 
+	kv.Save()
 	kv.Close()
 	fmt.Println("fixed-kv cli")
 
-	db, _ := fixedkv.Open("fixedkv.db")
+	db, _ := fixedkv.OpenReader("fixedkv.db")
 
 	val, _ := db.Get("A")
 	fmt.Println(string(val))
-
-	values := db.Values()
-	values[5][1] = 69
-	fmt.Printf("%v\n", values)
 
 	val, _ = db.Get("F")
 	fmt.Println(string(val))
