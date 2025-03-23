@@ -8,25 +8,24 @@ Data can be read using the `fixedkv.Open()`. This will load the database in read
 
 To edit a database, create a new database using `fixedkv.New()` and manually insert from disked backed copy.
 
-## Format
+## Format v1
 
 First 96 bytes of the file is used for storing the header.
 
 ```text
 <----------Header---------->
-| version | #keys | unused |   offsets    | key-values |
-| 4B      | 2B    | 90B    |   #keys * 2B | ...        |
+| version | #keys | unused | key-values |
+| 4B      | 2B    | 90B    | ...        |
 ```
 
 - File format version
 - Number of keys
 - Unused bytes for future use
-- Offset pointing to key/value pairs in the file
 - The stored key/value pairs of variable length key and values
 
-### Key Value format
+### Key Value format v1
 
-```
+```text
 | key len | value len | key | val |
 |   2B    |    2B     | ... | ... |
 ```
@@ -34,4 +33,3 @@ First 96 bytes of the file is used for storing the header.
 ## TODO
 
 - [ ] bounds checking for insert operations to keep within 4KB size
-- [ ] ability to edit persisted database file

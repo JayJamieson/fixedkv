@@ -16,46 +16,54 @@ type KVReader struct {
 }
 
 // Open a Fixed KV database for reading
-func Open(name string) (*KVReader, error) {
+func OpenReader(name string) (*KVReader, error) {
 	fp, err := os.OpenFile(name, os.O_RDWR, 0600)
 
 	if err != nil {
 		return nil, err
 	}
 
-	buff := make([]byte, MaxSize)
+	buff := make([]byte, DefaultSize)
 
-	// TODO: probably bounds check amount read
-	_, err = fp.Read(buff[:MaxSize])
+	// TODO: maybe need to do something when fsync fails
+	err = fp.Sync()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = fp.Read(buff[:DefaultSize])
 
 	if err != nil {
 		return nil, err
 	}
 
 	if !validateHeader(buff[:HeaderSize]) {
-		return nil, errInvalidHeader
+		return nil, ErrInvalidHeader
 	}
-
-	keyCount := binary.LittleEndian.Uint16(buff[KeyCountOffset:])
 
 	reader := &KVReader{
 		fp:       fp,
 		buff:     buff,
-		keyCount: keyCount,
+		keyCount: binary.LittleEndian.Uint16(buff[KeyCountOffset:]),
 		index:    btree.NewMap[string, uint16](DefaultDegree),
 	}
 
-	idx := int(HeaderSize + (keyCount-1)*2)
-
-	for i := HeaderSize; i <= idx; i += 2 {
-		offset := binary.LittleEndian.Uint16(reader.buff[i:])
-		klen := binary.LittleEndian.Uint16(reader.buff[offset:])
-
-		key := string(reader.buff[offset+4 : offset+4+klen])
-		reader.index.Load(key, offset)
-	}
+	loadIndex(reader)
 
 	return reader, nil
+}
+
+func loadIndex(reader *KVReader) {
+	keyOffset := uint16(HeaderSize)
+	for i := uint16(0); i <= reader.keyCount; i += 1 {
+		klen := binary.LittleEndian.Uint16(reader.buff[keyOffset:])
+		vlen := binary.LittleEndian.Uint16(reader.buff[keyOffset+2:])
+
+		key := string(reader.buff[keyOffset+4 : keyOffset+4+klen])
+		reader.index.Load(key, keyOffset)
+
+		keyOffset += 4 + klen + vlen
+	}
 }
 
 // Get an item
@@ -70,7 +78,7 @@ func (r *KVReader) Get(key string) ([]byte, bool) {
 	valLen := binary.LittleEndian.Uint16(r.buff[offset+2:])
 
 	start := offset + 4 + keyLen
-	end := offset + 4 + keyLen + valLen
+	end := start + valLen
 
 	return r.buff[start:end], true
 }
@@ -102,14 +110,7 @@ func validateHeader(header []byte) bool {
 	if len(header) != HeaderSize {
 		return false
 	}
+	actual := string(header[DBNameOffset : DBNameOffset+len(DBName)])
 
-	if string(header[DBNameOffset:DBNameOffset+len(DBName)]) != DBName {
-		return false
-	}
-
-	if binary.LittleEndian.Uint32(header) != encodeVersion(Major, Minor, Patch) {
-		return false
-	}
-
-	return true
+	return actual == DBName
 }
