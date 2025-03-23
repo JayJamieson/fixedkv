@@ -77,8 +77,6 @@ func writeHeader(buff []byte, keyCount uint16) {
 }
 
 func (kv *FixedKV) Get(key string) ([]byte, bool) {
-	// TODO add readonly check and scan for key from disk instead of index
-	// after scan add key to index
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
